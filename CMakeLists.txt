@@ -11,9 +11,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(PIN_ROOT /home/sekar/Desktop/pin-kit)
 set(PIN_INCLUDE_DIR ${PIN_ROOT}/source/include)
 set(PIN_LIB_DIR ${PIN_ROOT}/intel64/lib)
+set(PIN_XED_INCLUDE_DIR ${PIN_ROOT}/extras/xed-intel64/include)
 
 # Include directories
-include_directories(${PIN_INCLUDE_DIR})
+include_directories(${PIN_INCLUDE_DIR} ${PIN_XED_INCLUDE_DIR})
 
 # Add your source files
 set(SOURCES
