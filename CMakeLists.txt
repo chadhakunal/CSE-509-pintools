@@ -25,8 +25,7 @@ add_executable(CSE-509-PinTool ${SOURCES})
 
 # Link against the Pin libraries
 target_link_libraries(CSE-509-PinTool
-    ${PIN_LIB_DIR}/pin.a
-    ${PIN_LIB_DIR}/pincrt.a
+    ${PIN_LIB_DIR}/libpin.a
 )
 
 # Additional flags for compatibility with Pin
