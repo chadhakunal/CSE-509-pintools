@@ -31,3 +31,7 @@
 *.exe
 *.out
 *.app
+object-intel64/*
+
+# Other files
+*.vcxproj
