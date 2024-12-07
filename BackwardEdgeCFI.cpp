@@ -5,7 +5,7 @@
  
 #include <iostream>
 #include <fstream>
-#include "pin/pin.H"
+#include "pin.H"
 using std::cerr;
 using std::endl;
 using std::ios;
