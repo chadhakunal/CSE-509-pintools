@@ -104,7 +104,6 @@ VOID ThreadFini(THREADID threadid, const CONTEXT* ctxt, INT32 code, VOID* v) {
     }
 
     delete tdata;
-    std::cout << "Thread " << threadid << " finished." << std::endl;   
 }
 
 // Analysis routine for calls
@@ -133,11 +132,9 @@ VOID HandleReturn(THREADID threadid, ADDRINT return_address, ADDRINT current_add
         pair<ADDRINT, ADDRINT> stack_top = tdata->call_stack.top();
         tdata->call_stack.pop();
         if (stack_top.second == return_address) {
-            // std::cout<<"Matched: "<<std::hex<<stack_top.first<<", "<<stack_top.second<<", "<<return_address<<", "<<address_map[stack_top.first].routine_name <<std::endl;
             match_found = true;
             break;
         } else {
-            std::cout<<"Mismatch! Checking next stack entry" << std::endl;
             temp_stack.push(stack_top);
         }
     }
@@ -179,7 +176,6 @@ VOID RecordAddressInfo(ADDRINT address) {
 
     IMG img = IMG_FindByAddress(address);
     if (!IMG_Valid(img)) {
-        // std::cout << "Address 0x" << std::hex << address << " not in any valid image." << std::endl;
         PIN_UnlockClient();
         return;
     }
@@ -206,7 +202,6 @@ VOID Routine(RTN rtn, VOID* v) {
         PIN_LockClient();
         ADDRINT rtn_address = RTN_Address(rtn);
         std::string rtn_name = RTN_Name(rtn);
-        // std::cout<<"Routine Address: "<< std::hex << rtn_address<< ", Routine Name: "<<rtn_name<<std::endl;
         if (address_map.find(rtn_address) != address_map.end()) {
             address_map[rtn_address].routine_name = rtn_name;
         }
@@ -257,10 +252,6 @@ int main(int argc, char *argv[]) {
     PIN_AddFollowChildProcessFunction(FollowChild, 0);
 
     tls_key = PIN_CreateThreadDataKey(nullptr); 
-
-    // ThreadData* tdata = new ThreadData();
-    // PIN_SetThreadData(tls_key, tdata, 0);
-    // std::cout << "Initialized ThreadData for thread 0" << std::endl;
 
     OutFile.open(KnobOutputFile.Value().c_str());
 
