@@ -92,7 +92,7 @@ VOID HandleReturn(THREADID threadid, ADDRINT rsp) {
     if (PIN_SafeCopy(&return_address, (VOID *)rsp, sizeof(ADDRINT)) == sizeof(ADDRINT)) {
         if (!tdata->call_stack.empty()) {
             stack<pair<ADDRINT, ADDRINT> > temp_stack;
-            pair<ADDRINT, ADDRINT> initial_top = tdata->call_stack.top();
+            // pair<ADDRINT, ADDRINT> initial_top = tdata->call_stack.top();
             bool match_found = false;
 
             for (int i = 0; i < MAX_STACK_CHECK_DEPTH && !tdata->call_stack.empty(); i++) {
