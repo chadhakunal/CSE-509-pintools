@@ -2,7 +2,6 @@
 
 #include <iostream>
 #include <fstream>
-#include <functional>
 #include <stack>
 #include <unordered_map>
 #include "pin.H"
@@ -17,7 +16,6 @@ using std::pair;
 using std::make_pair;
 using std::stack;
 using std::vector;
-using std::hash;
 
 TLS_KEY tls_key;
 
@@ -28,26 +26,15 @@ struct AddressInfo {
     std::string routine_name;
 };
 
-struct hash_pair {
-    template <class T1, class T2>
-    size_t operator()(const pair<T1, T2>& p) const
-    {
-        size_t hash1 = hash<T1> {}(p.first);
-        size_t hash2 = hash<T2> {}(p.second);
-        return hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2));
-    }
-};
-
 struct ThreadData {
     stack<pair<ADDRINT, ADDRINT> > call_stack;
-    unordered_map<pair<ADDRINT, ADDRINT>, UINT64, hash_pair> mismatches;
+    unordered_map<ADDRINT, UINT64> mismatches;
 };
 
-// Map of address to routine names, image names, offset
 std::unordered_map<ADDRINT, AddressInfo> address_map;
 
-// Output file that contains summary of mismatches
 ofstream OutFile;
+
 KNOB< string > KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool", "o", "outputs/backward_edge_cfi.out", "specify output file name"); 
 
 ThreadData* GetThreadData(THREADID threadid) {
@@ -58,15 +45,14 @@ ThreadData* GetThreadData(THREADID threadid) {
 VOID ThreadStart(THREADID threadid, CONTEXT* ctxt, INT32 flags, VOID* v) {
     ThreadData* tdata = new ThreadData();  // Allocate thread-specific data
     PIN_SetThreadData(tls_key, tdata, threadid);
+    std::cout << "Thread " << threadid << " started." << std::endl;
 }
 
-// Handle thread finish and write summary of the thread to Outfile
 VOID ThreadFini(THREADID threadid, const CONTEXT* ctxt, INT32 code, VOID* v) {
     ThreadData* tdata = GetThreadData(threadid);
     OutFile.setf(ios::showbase);
     OutFile << "Thread " << threadid << " mismatches:" << std::endl;
-    OutFile << std::left << std::setw(18) << "Instruction" 
-        << std::setw(18) << "Address" 
+    OutFile << std::left << std::setw(18) << "Address" 
         << std::setw(8) << "Count" 
         << std::setw(30) << "Routine" 
         << std::setw(15) << "Section" 
@@ -75,93 +61,77 @@ VOID ThreadFini(THREADID threadid, const CONTEXT* ctxt, INT32 code, VOID* v) {
         << std::endl;
     OutFile << std::string(95, '-') << std::endl;
 
-    if(tdata->mismatches.size() > 0) {
-        for (const auto& pair : tdata->mismatches) {
-            const AddressInfo& call_info = address_map[pair.first.first];
-            OutFile << std::left << std::setw(18) << "Call" 
-                    << std::setw(18) << std::hex << pair.first.first 
-                    << std::setw(8) << std::dec << pair.second 
-                    << std::setw(30) << call_info.routine_name 
-                    << std::setw(15) << call_info.section_name 
-                    << std::setw(10) << std::hex << call_info.offset 
-                    << std::setw(35) << call_info.image_name 
-                    << std::endl;
-            
-            const AddressInfo& ret_info = address_map[pair.first.second];
-            OutFile << std::left << std::setw(18) << "Return" 
-                    << std::setw(18) << std::hex << pair.first.second
-                    << std::setw(8) << std::dec << pair.second 
-                    << std::setw(30) << ret_info.routine_name 
-                    << std::setw(15) << ret_info.section_name 
-                    << std::setw(10) << std::hex << ret_info.offset 
-                    << std::setw(35) << ret_info.image_name 
-                    << std::endl;
-            OutFile << std::endl;
-        }
-        OutFile << std::endl;
-    } else {
-        OutFile << "No Mismatches!" << std::endl;
+    for (const auto& pair : tdata->mismatches) {
+        const AddressInfo& info = address_map[pair.first];
+        OutFile << std::left << std::setw(18) << std::hex << pair.first 
+                << std::setw(8) << std::dec << pair.second 
+                << std::setw(30) << info.routine_name 
+                << std::setw(15) << info.section_name 
+                << std::setw(10) << std::hex << info.offset 
+                << std::setw(35) << info.image_name 
+                << std::endl;
     }
+    OutFile << std::endl;
 
     delete tdata;
-    std::cout << "Thread " << threadid << " finished." << std::endl;   
+    std::cout << "Thread " << threadid << " finished." << std::endl;
 }
 
 // Analysis routine for calls
-// call_address: address of the call instruction
-// expected_return_address: return address a ret should jump back to
-VOID HandleCall(THREADID threadid, ADDRINT call_address, ADDRINT expected_return_address) {
+VOID HandleCall(THREADID threadid, ADDRINT call_address, ADDRINT return_address) {
     ThreadData* tdata = GetThreadData(threadid);
-    tdata->call_stack.push(make_pair(call_address, expected_return_address));
+    // std::cout << "CALL instruction at: 0x" << std::hex << call_address << ", will return to: 0x" << std::hex << return_address << std::endl;
+    tdata->call_stack.push(make_pair(call_address, return_address));
 }
 
 // Analysis routine for returns
-// return_address: target ret will jump to
-// current_address: address of the ret instruction
-VOID HandleReturn(THREADID threadid, ADDRINT return_address, ADDRINT current_address) {
+VOID HandleReturn(THREADID threadid, ADDRINT rsp) {
     ThreadData* tdata = GetThreadData(threadid);
+    ADDRINT return_address;
 
-    if (tdata->call_stack.empty()) {
-        std::cout << "Warning: Return without corresponding call!" << std::endl;
-        return;
-    }
+    if (PIN_SafeCopy(&return_address, (VOID *)rsp, sizeof(ADDRINT)) == sizeof(ADDRINT)) {
+        if (!tdata->call_stack.empty()) {
+            stack<pair<ADDRINT, ADDRINT> > temp_stack;
+            // pair<ADDRINT, ADDRINT> initial_top = tdata->call_stack.top();
+            bool match_found = false;
 
-    stack<pair<ADDRINT, ADDRINT> > temp_stack;
-    bool match_found = false;
+            for (int i = 0; i < MAX_STACK_CHECK_DEPTH && !tdata->call_stack.empty(); i++) {
+                pair<ADDRINT, ADDRINT> stack_top = tdata->call_stack.top();
+                if (stack_top.second == return_address) {
+                    // std::cout<<"Matched: "<<std::hex<<stack_top.first<<", "<<stack_top.second<<", "<<return_address<<", "<<address_map[stack_top.first].routine_name <<std::endl;
+                    match_found = true;
+                    tdata->call_stack.pop();
+                    break;
+                } else {
+                    std::cout<<"Mismatch! Checking next stack entry" << std::endl;
+                    temp_stack.push(stack_top);
+                }
+                tdata->call_stack.pop();
+            }
 
-    for (int i = 0; i < MAX_STACK_CHECK_DEPTH && !tdata->call_stack.empty(); i++) {
-        pair<ADDRINT, ADDRINT> stack_top = tdata->call_stack.top();
-        tdata->call_stack.pop();
-        if (stack_top.second == return_address) {
-            // std::cout<<"Matched: "<<std::hex<<stack_top.first<<", "<<stack_top.second<<", "<<return_address<<", "<<address_map[stack_top.first].routine_name <<std::endl;
-            match_found = true;
-            break;
+            if (!match_found) {
+                while(!temp_stack.empty()) {
+                    tdata->call_stack.push(temp_stack.top());
+                    temp_stack.pop();
+                }
+
+                // Log the mismatch
+                pair<ADDRINT, ADDRINT> stack_top = tdata->call_stack.top();
+                tdata->mismatches[stack_top.first]++;
+                std::cout << "Mismatch detected! Call address: 0x" << std::hex << stack_top.first
+                        << ", Expected return address: 0x" << stack_top.second
+                        << ", Actual return address: 0x" << return_address 
+                        // << ", Routine: " << address_map[stack_top.first].routine_name 
+                        // << ", Image: " << address_map[stack_top.first].image_name 
+                        // << ", Section: " << address_map[stack_top.first].section_name 
+                        // << ", Offset: 0x" << address_map[stack_top.first].offset
+                        << std::endl;
+            }
         } else {
-            std::cout<<"Mismatch! Checking next stack entry" << std::endl;
-            temp_stack.push(stack_top);
+            std::cout << "Warning: Return without corresponding call!" << std::endl;
         }
-    }
-
-    if (!match_found) {
-        while(!temp_stack.empty()) {
-            tdata->call_stack.push(temp_stack.top());
-            temp_stack.pop();
-        }
-
-        // Log the mismatch
-        pair<ADDRINT, ADDRINT> stack_top = tdata->call_stack.top();
-
-        pair<ADDRINT, ADDRINT> mismatches_key = {stack_top.first, current_address};
-        tdata->mismatches[mismatches_key]++;
-        std::cout << "Mismatch detected at address: 0x" << std::hex << current_address
-                << ", Called from address: 0x" << stack_top.first
-                << ", Expected return target: 0x" << stack_top.second
-                << ", Actual return target: 0x" << return_address  
-                << ", Routine: " << address_map[current_address].routine_name 
-                << ", Image: " << address_map[current_address].image_name 
-                << ", Section: " << address_map[current_address].section_name 
-                << ", Offset: 0x" << address_map[current_address].offset
-                << std::endl;
+    } else {
+        std::cout << "Failed to read return address from stack!" << std::endl;
     }
 }
 
@@ -179,7 +149,7 @@ VOID RecordAddressInfo(ADDRINT address) {
 
     IMG img = IMG_FindByAddress(address);
     if (!IMG_Valid(img)) {
-        // std::cout << "Address 0x" << std::hex << address << " not in any valid image." << std::endl;
+        std::cout << "Address 0x" << std::hex << address << " not in any valid image." << std::endl;
         PIN_UnlockClient();
         return;
     }
@@ -199,6 +169,12 @@ VOID RecordAddressInfo(ADDRINT address) {
 
     address_map[address] = {image_name, section_name, offset, routine_name};
     PIN_UnlockClient();
+
+    // std::cout << "Recorded: Address 0x" << std::hex << address 
+    //           << ", Image: " << image_name 
+    //           << ", Section: " << section_name 
+    //           << ", Offset: 0x" << offset 
+    //           << ", Routine: " << routine_name << std::endl;
 }
 
 VOID Routine(RTN rtn, VOID* v) {
@@ -229,9 +205,7 @@ VOID Instruction(INS ins, VOID *v) {
     // Instrument RET instructions
     else if (INS_IsRet(ins))
     {
-        ADDRINT ret_address = INS_Address(ins);
-        RecordAddressInfo(ret_address);
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleReturn, IARG_THREAD_ID, IARG_BRANCH_TARGET_ADDR, IARG_ADDRINT, ret_address, IARG_END);
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleReturn, IARG_THREAD_ID, IARG_REG_VALUE, REG_STACK_PTR, IARG_END);
     }
 }
 
