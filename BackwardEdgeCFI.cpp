@@ -27,8 +27,8 @@ struct AddressInfo {
 };
 
 struct ThreadData {
-    stack<pair<ADDRINT, ADDRINT> > call_stack;
-    unordered_map<ADDRINT, UINT64> mismatches;
+    stack<pair<ADDRINT, ADDRINT>> call_stack;
+    unordered_map<ADDRINT, pair<ADDRINT, UINT64>> mismatches;
 };
 
 std::unordered_map<ADDRINT, AddressInfo> address_map;
@@ -54,6 +54,8 @@ VOID ThreadFini(THREADID threadid, const CONTEXT* ctxt, INT32 code, VOID* v) {
     OutFile << "Thread " << threadid << " mismatches:" << std::endl;
     OutFile << std::left << std::setw(18) << "Address" 
         << std::setw(8) << "Count" 
+        << std::setw(30) << "Calling routine"
+        << std::setw(30) << "Expected return routine"
         << std::setw(30) << "Routine" 
         << std::setw(15) << "Section" 
         << std::setw(10) << "Offset" 
@@ -63,9 +65,11 @@ VOID ThreadFini(THREADID threadid, const CONTEXT* ctxt, INT32 code, VOID* v) {
 
     for (const auto& pair : tdata->mismatches) {
         const AddressInfo& info = address_map[pair.first];
+        const AddressInfo& info2 = address_map[pair.second.first];
         OutFile << std::left << std::setw(18) << std::hex << pair.first 
-                << std::setw(8) << std::dec << pair.second 
+                << std::setw(8) << std::dec << pair.second.second 
                 << std::setw(30) << info.routine_name 
+                << std::setw(30) << info2.routine_name
                 << std::setw(15) << info.section_name 
                 << std::setw(10) << std::hex << info.offset 
                 << std::setw(35) << info.image_name 
@@ -80,25 +84,22 @@ VOID ThreadFini(THREADID threadid, const CONTEXT* ctxt, INT32 code, VOID* v) {
 // Analysis routine for calls
 VOID HandleCall(THREADID threadid, ADDRINT call_address, ADDRINT return_address) {
     ThreadData* tdata = GetThreadData(threadid);
-    // std::cout << "CALL instruction at: 0x" << std::hex << call_address << ", will return to: 0x" << std::hex << return_address << std::endl;
     tdata->call_stack.push(make_pair(call_address, return_address));
 }
 
 // Analysis routine for returns
-VOID HandleReturn(THREADID threadid, ADDRINT rsp) {
+VOID HandleReturn(THREADID threadid, ADDRINT call_address, ADDRINT target_address, ADDRINT rsp) {
     ThreadData* tdata = GetThreadData(threadid);
     ADDRINT return_address;
 
-    if (PIN_SafeCopy(&return_address, (VOID *)rsp, sizeof(ADDRINT)) == sizeof(ADDRINT)) {
+    if (PIN_SafeCopy(&return_address, (VOID *)target_address, sizeof(ADDRINT)) == sizeof(ADDRINT)) {
         if (!tdata->call_stack.empty()) {
             stack<pair<ADDRINT, ADDRINT> > temp_stack;
-            pair<ADDRINT, ADDRINT> initial_top = tdata->call_stack.top();
             bool match_found = false;
 
             for (int i = 0; i < MAX_STACK_CHECK_DEPTH && !tdata->call_stack.empty(); i++) {
                 pair<ADDRINT, ADDRINT> stack_top = tdata->call_stack.top();
                 if (stack_top.second == return_address) {
-                    // std::cout<<"Matched: "<<std::hex<<stack_top.first<<", "<<stack_top.second<<", "<<return_address<<", "<<address_map[stack_top.first].routine_name <<std::endl;
                     match_found = true;
                     tdata->call_stack.pop();
                     break;
@@ -116,15 +117,15 @@ VOID HandleReturn(THREADID threadid, ADDRINT rsp) {
                 }
 
                 // Log the mismatch
-                pair<ADDRINT, ADDRINT> stack_top = tdata->call_stack.top();
-                tdata->mismatches[stack_top.first]++;
-                std::cout << "Mismatch detected! Call address: 0x" << std::hex << stack_top.first
-                        << ", Expected return address: 0x" << stack_top.second
+                if (tdata->mismatches.find(call_address) == tdata->mismatches.end()) {
+                    tdata->mismatches[call_address] = { tdata->call_stack.top().first, 1 };
+                } else {
+                    tdata->mismatches[call_address].second++;
+                }
+                
+                std::cout << "Mismatch detected! Call address: 0x" << std::hex << call_address
+                        << ", Expected return address: 0x" << tdata->call_stack.top().second
                         << ", Actual return address: 0x" << return_address 
-                        // << ", Routine: " << address_map[stack_top.first].routine_name 
-                        // << ", Image: " << address_map[stack_top.first].image_name 
-                        // << ", Section: " << address_map[stack_top.first].section_name 
-                        // << ", Offset: 0x" << address_map[stack_top.first].offset
                         << std::endl;
             }
         } else {
@@ -169,12 +170,6 @@ VOID RecordAddressInfo(ADDRINT address) {
 
     address_map[address] = {image_name, section_name, offset, routine_name};
     PIN_UnlockClient();
-
-    // std::cout << "Recorded: Address 0x" << std::hex << address 
-    //           << ", Image: " << image_name 
-    //           << ", Section: " << section_name 
-    //           << ", Offset: 0x" << offset 
-    //           << ", Routine: " << routine_name << std::endl;
 }
 
 VOID Routine(RTN rtn, VOID* v) {
@@ -182,7 +177,6 @@ VOID Routine(RTN rtn, VOID* v) {
         PIN_LockClient();
         ADDRINT rtn_address = RTN_Address(rtn);
         std::string rtn_name = RTN_Name(rtn);
-        // std::cout<<"Routine Address: "<< std::hex << rtn_address<< ", Routine Name: "<<rtn_name<<std::endl;
         if (address_map.find(rtn_address) != address_map.end()) {
             address_map[rtn_address].routine_name = rtn_name;
         }
@@ -198,14 +192,16 @@ VOID Instruction(INS ins, VOID *v) {
     {
         ADDRINT call_address = INS_Address(ins);
         ADDRINT return_address = INS_NextAddress(ins);
-        RecordAddressInfo(call_address);
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleCall, IARG_THREAD_ID, IARG_ADDRINT, call_address, IARG_ADDRINT, return_address, IARG_END);
     }
 
     // Instrument RET instructions
     else if (INS_IsRet(ins))
     {
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleReturn, IARG_THREAD_ID, IARG_REG_VALUE, REG_STACK_PTR, IARG_END);
+        ADDRINT call_address = INS_Address(ins);
+        ADDRINT target_address = IARG_BRANCH_TARGET_ADDR;
+        RecordAddressInfo(target_address);
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)HandleReturn, IARG_THREAD_ID, IARG_ADDRINT, call_address, IARG_ADDRINT, target_address);
     }
 }
 
@@ -231,10 +227,6 @@ int main(int argc, char *argv[]) {
     PIN_AddFollowChildProcessFunction(FollowChild, 0);
 
     tls_key = PIN_CreateThreadDataKey(nullptr); 
-
-    // ThreadData* tdata = new ThreadData();
-    // PIN_SetThreadData(tls_key, tdata, 0);
-    // std::cout << "Initialized ThreadData for thread 0" << std::endl;
 
     OutFile.open(KnobOutputFile.Value().c_str());
 
